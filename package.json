@@ -1,0 +1,10 @@
+{
+  "name": "finsight-ifos",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=apps/web"
+  }
+}
