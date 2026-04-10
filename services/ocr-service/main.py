@@ -9,11 +9,14 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from receipt_parser import parse_receipt
-import os, hashlib, base64, io, re, asyncio, httpx
+import os, hashlib, base64, io, re, asyncio, httpx, json
 from copy import deepcopy
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import pytesseract  # type: ignore[import-not-found]
 from pypdf import PdfReader
+import fitz
+import pdfplumber
+import google.generativeai as genai
 import numpy as np
 
 try:
@@ -30,7 +33,11 @@ GOOGLE_KEY = os.getenv("GOOGLE_CLOUD_VISION_KEY", "")
 AZURE_DOCINT_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").rstrip("/")
 AZURE_DOCINT_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_DOCINT_MODEL = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_MODEL", "prebuilt-receipt")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 OCR_MODE = os.getenv("OCR_MODE", "fast").strip().lower()  # fast | accurate
+
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
 
 SUPPORTED_FORMATS = {
     "image/jpeg":    True,
@@ -47,6 +54,9 @@ MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 MB
 _rapid_ocr_engine = RapidOCR() if RapidOCR else None
 OCR_CACHE_MAX = int(os.getenv("OCR_CACHE_MAX", "200"))
 _ocr_result_cache: dict[str, dict] = {}
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "25"))
+FRAUD_SERVICE_URL = os.getenv("FRAUD_SERVICE_URL", "http://fraud-service:8001").rstrip("/")
+COMPLIANCE_LOG_PATH = os.getenv("COMPLIANCE_LOG_PATH", "/tmp/ocr_audit_log.jsonl")
 
 
 def _cache_get(cache_key: str) -> dict | None:
@@ -61,6 +71,20 @@ def _cache_set(cache_key: str, payload: dict) -> None:
     _ocr_result_cache[cache_key] = deepcopy(payload)
 
 
+def _append_compliance_log(event: dict) -> None:
+    """Append parse events to a JSONL audit trail for compliance investigations."""
+    try:
+        line = json.dumps(event, ensure_ascii=True)
+        log_dir = os.path.dirname(COMPLIANCE_LOG_PATH)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(COMPLIANCE_LOG_PATH, "a", encoding="utf-8") as fp:
+            fp.write(line + "\n")
+    except Exception:
+        # Never break parsing due to audit write failures.
+        pass
+
+
 def _is_strong_candidate(parsed: dict, confidence: float) -> bool:
     """Decide if we can stop early for speed."""
     has_total = parsed.get("total") is not None and float(parsed.get("total") or 0) > 0
@@ -71,46 +95,101 @@ def _is_strong_candidate(parsed: dict, confidence: float) -> bool:
 
 
 def extract_text_pdf_native(pdf_bytes: bytes) -> tuple[str, float]:
-    """Fast path for text-based PDFs: extract text without OCR/image conversion."""
+    """Extract text from all PDF pages using pdfplumber/pypdf fallback."""
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
         text_parts = []
-        for page in reader.pages[:3]:
-            text_parts.append(page.extract_text() or "")
-        text = "\n".join(p for p in text_parts if p).strip()
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages[:MAX_PDF_PAGES]:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+        text = "\n\n".join(text_parts).strip()
         if len(text) >= 40:
             return text, 0.99
     except Exception:
-        pass
+        # Fallback to pypdf if pdfplumber fails
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            text_parts = [p.extract_text() or "" for p in reader.pages[:MAX_PDF_PAGES]]
+            text = "\n".join(p for p in text_parts if p).strip()
+            if len(text) >= 40:
+                return text, 0.95
+        except Exception:
+            pass
     return "", 0.0
 
 
-async def pdf_to_image_bytes(pdf_bytes: bytes) -> bytes:
-    """Convert first page of PDF to PNG bytes using pdf2image."""
+async def parse_with_ai(text: str, image_list: list[bytes], confidence: float) -> dict | None:
+    """Use Gemini Multimodal Vision to parse multiple images and text into structured JSON."""
+    if not GEMINI_KEY:
+        return None
+
+    prompt = f"""
+    You are an AI Document Specialist. Analyze these document images (could be multiple pages) and the provided text.
+    
+    GOAL: Extract structured financial data with 100% accuracy.
+    
+    FIELDS TO EXTRACT:
+    - merchant_name: Business name. Look at logos/headers on page 1.
+    - merchant_id: GST/Tax ID.
+    - expense_date: Format YYYY-MM-DD.
+    - subtotal: Base amount.
+    - tax_amount: Total tax.
+    - discount_amount: Total discount.
+    - total: FINAL PAYABLE AMOUNT.
+    - currency: 3-letter code.
+    - document_type: retail_invoice, bus_ticket, train_ticket, flight_ticket, utility_bill, hotel_bill, general_receipt.
+    - rationale: Briefly describe where critical values were found.
+
+    OCR CONTEXT:
+    {text[:4000]}
+    
+    RULES:
+    1. If missing, use null.
+    2. Numbers must be floats.
+    3. Return ONLY a valid JSON object.
+    4. BE SMART: If the OCR text is messy but the IMAGE is clear (like a dot-matrix ticket), TRUST YOUR EYES on the image.
+    """
+
     try:
-        from pdf2image import convert_from_bytes  # type: ignore[import-not-found]
-        pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=300)
-        if pages:
-            buf = io.BytesIO()
-            pages[0].save(buf, format="PNG")
-            return buf.getvalue()
-    except Exception:
-        pass
-    return pdf_bytes  # fallback: send raw bytes
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Prepare multimodal parts for all pages
+        parts = []
+        for img_bytes in image_list[:5]: # Limit to 5 pages for speed
+            parts.append({"mime_type": "image/jpeg", "data": img_bytes})
+        parts.append(prompt)
+        
+        response = await asyncio.to_thread(model.generate_content, parts)
+        res_text = response.text
+        json_match = re.search(r"\{.*\}", res_text, re.DOTALL)
+        if json_match:
+            import json
+            parsed = json.loads(json_match.group(0))
+            parsed["ai_parsed"] = True
+            parsed["confidence"] = confidence
+            parsed["method"] = f"Gemini-Vision ({len(image_list)} pgs)"
+            return parsed
+    except Exception as e:
+        print(f"Vision AI parsing error: {str(e)}")
+    return None
 
 
-async def pdf_to_image_pages_bytes(pdf_bytes: bytes, max_pages: int = 3) -> list[bytes]:
-    """Convert up to max_pages of PDF to PNG bytes for scanned-document OCR."""
+async def pdf_to_images_fitz(pdf_bytes: bytes, max_pages: int = MAX_PDF_PAGES) -> list[bytes]:
+    """Convert every PDF page (up to configured limit) to images for OCR."""
     try:
-        from pdf2image import convert_from_bytes  # type: ignore[import-not-found]
-        pages = convert_from_bytes(pdf_bytes, first_page=1, last_page=max_pages, dpi=260)
-        out: list[bytes] = []
-        for page in pages:
-            buf = io.BytesIO()
-            page.save(buf, format="PNG")
-            out.append(buf.getvalue())
-        return out
-    except Exception:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        images = []
+        for i in range(min(len(doc), max_pages)):
+            page = doc.load_page(i)
+            # Render page to a high-res image (300 DPI)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_data = pix.tobytes("jpeg")
+            images.append(img_data)
+        doc.close()
+        return images
+    except Exception as e:
+        print(f"Fitz conversion error: {str(e)}")
         return []
 
 
@@ -537,6 +616,122 @@ def _ensemble_fields(candidates: list[tuple[float, str, float, dict]]) -> dict:
     return {k: v for k, v in consensus.items() if v is not None}
 
 
+def _calc_math_mismatch(subtotal: float | None, tax_amount: float | None, total: float | None) -> bool:
+    if subtotal is None or tax_amount is None or total is None:
+        return False
+    expected = round(float(subtotal) + float(tax_amount), 2)
+    return abs(expected - float(total)) > max(1.0, expected * 0.02)
+
+
+async def _fraud_precheck(image_hash: str, parsed: dict) -> dict:
+    payload = {
+        "employee_id": "ocr-ingest",
+        "merchant_name": parsed.get("merchant_name") or parsed.get("merchant") or "",
+        "merchant_id": parsed.get("merchant_id") or None,
+        "total_amount": float(parsed.get("total") or 0),
+        "subtotal": float(parsed.get("subtotal") or 0),
+        "tax_amount": float(parsed.get("tax_amount") or parsed.get("tax") or 0),
+        "expense_date": parsed.get("expense_date") or parsed.get("date") or None,
+        "receipt_hash": image_hash,
+        "category": parsed.get("category") or "other",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            res = await client.post(f"{FRAUD_SERVICE_URL}/analyze", json=payload)
+            if res.status_code < 400:
+                data = res.json()
+                return {
+                    "fraud_score": float(data.get("fraud_score") or 0),
+                    "fraud_reason": data.get("fraud_reason") or data.get("reason") or None,
+                }
+    except Exception:
+        pass
+    return {"fraud_score": 0.0, "fraud_reason": None}
+
+
+def _normalize_parse_response(parsed: dict, raw_text: str, confidence: float, image_hash: str, page_count: int) -> dict:
+    merchant = parsed.get("merchant") or parsed.get("merchant_name")
+    date = parsed.get("date") or parsed.get("expense_date")
+    subtotal = parsed.get("subtotal")
+    tax = parsed.get("tax") if parsed.get("tax") is not None else parsed.get("tax_amount")
+    total = parsed.get("total")
+
+    normalized = {
+        "merchant": merchant,
+        "date": date,
+        "subtotal": subtotal,
+        "tax": tax,
+        "total": total,
+        # Compatibility keys used by existing UI/state shape.
+        "merchant_name": merchant,
+        "expense_date": date,
+        "tax_amount": tax,
+        "math_mismatch": _calc_math_mismatch(subtotal, tax, total),
+        "raw_text": raw_text,
+        "confidence": confidence,
+        "image_hash": image_hash,
+        "page_count_processed": page_count,
+        "rationale": parsed.get("rationale") or {},
+        "category": parsed.get("category") or "other",
+    }
+    return normalized
+
+
+async def _parse_document(contents: bytes, content_type: str, filename: str, image_hash: str) -> dict:
+    filename_lower = (filename or "").lower()
+    is_pdf = content_type == "application/pdf" or filename_lower.endswith(".pdf")
+
+    raw_text = ""
+    confidence = 0.0
+    page_images: list[bytes]
+    page_count = 1
+    parsed: dict = {}
+
+    if is_pdf:
+        page_images = await pdf_to_images_fitz(contents, max_pages=MAX_PDF_PAGES)
+        if not page_images:
+            raise HTTPException(status_code=422, detail="PDF could not be rendered. Please upload a readable document.")
+
+        page_count = len(page_images)
+        native_text, native_conf = extract_text_pdf_native(contents)
+        raw_text, confidence = native_text, native_conf
+
+        # OCR each page asynchronously and merge strongest fields.
+        tasks = [extract_best_text(img) for img in page_images]
+        page_ocr_results = await asyncio.gather(*tasks, return_exceptions=True)
+        page_results: list[tuple[int, str, float, dict]] = []
+        for idx, item in enumerate(page_ocr_results):
+            if isinstance(item, Exception):
+                continue
+            text_i, conf_i, parsed_i = item
+            if text_i or parsed_i:
+                page_results.append((idx + 1, text_i, conf_i, parsed_i or {}))
+
+        if page_results:
+            merged_text, merged_conf, merged_parsed = _merge_page_parsed(page_results)
+            raw_text = "\n\n".join(p for p in [raw_text, merged_text] if p).strip()
+            confidence = max(confidence, merged_conf)
+            parsed = merged_parsed
+
+        ai_parsed = await parse_with_ai(raw_text, page_images, confidence)
+        if ai_parsed:
+            for key in ["merchant_name", "expense_date", "subtotal", "tax_amount", "total", "category", "document_type", "discount_amount"]:
+                if ai_parsed.get(key) is not None:
+                    parsed[key] = ai_parsed[key]
+            parsed["ai_parsed"] = True
+            parsed["method"] = ai_parsed.get("method", "Gemini-Vision")
+    else:
+        page_images = [contents]
+        page_count = 1
+        raw_text, confidence, parsed = await extract_best_text(contents)
+        if not parsed:
+            parsed = parse_receipt(raw_text, confidence)
+
+    if not parsed:
+        parsed = parse_receipt(raw_text, confidence)
+    return _normalize_parse_response(parsed, raw_text, confidence, image_hash, page_count)
+
+
 async def extract_best_text(image_bytes: bytes) -> tuple[str, float, dict]:
     """Run hybrid OCR over enhanced variants and pick the most reliable parse result."""
     variants = build_image_variants(image_bytes)
@@ -670,8 +865,8 @@ async def extract_best_text(image_bytes: bytes) -> tuple[str, float, dict]:
     return best[1], weighted_confidence, final_parsed
 
 
-@app.post("/extract")
-async def extract_receipt(file: UploadFile = File(...)):
+@app.post("/parse-receipt")
+async def parse_receipt_endpoint(file: UploadFile = File(...)):
     """
     Auto-reads any bill format (PDF/JPG/PNG/etc) and extracts:
     - Merchant name
@@ -699,80 +894,48 @@ async def extract_receipt(file: UploadFile = File(...)):
         cached_payload["cached"] = True
         return cached_payload
 
-    # Convert PDF to image if needed
     content_type = file.content_type or ""
-    filename_lower = (file.filename or "").lower()
+    normalized = await _parse_document(contents, content_type, file.filename or "", image_hash)
+    if not normalized.get("total") and not normalized.get("raw_text"):
+        raise HTTPException(status_code=422, detail="Document AI could not read this file. Please ensure it is a clear scan.")
 
-    raw_text = ""
-    confidence = 0.0
-    parsed: dict = {}
-
-    if content_type == "application/pdf" or filename_lower.endswith(".pdf"):
-        # 1) Fast extraction for digital PDFs.
-        raw_text, confidence = extract_text_pdf_native(contents)
-        # 2) Fallback to OCR conversion for scanned PDFs.
-        if not raw_text.strip():
-            try:
-                max_pages = 2 if OCR_MODE == "fast" else 4
-                page_images = await pdf_to_image_pages_bytes(contents, max_pages=max_pages)
-                if page_images:
-                    page_results: list[tuple[int, str, float, dict]] = []
-                    for page_idx, page_bytes in enumerate(page_images, start=1):
-                        page_text, page_conf, page_parsed = await extract_best_text(page_bytes)
-                        if page_text.strip():
-                            page_results.append((page_idx, page_text, page_conf, page_parsed))
-                            if OCR_MODE == "fast" and _is_strong_candidate(page_parsed, page_conf):
-                                break
-
-                    if page_results:
-                        raw_text, confidence, parsed = _merge_page_parsed(page_results)
-                    else:
-                        contents = await pdf_to_image_bytes(contents)
-                else:
-                    contents = await pdf_to_image_bytes(contents)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"PDF conversion failed: {str(e)}")
-
-    # Hybrid OCR: multi-variant extraction + best-candidate selection.
-    if not raw_text.strip():
-        raw_text, confidence, parsed = await extract_best_text(contents)
-
-    # If text came from native PDF extraction, parse and score directly.
-    if raw_text.strip() and not parsed:
-        _, parsed = _score_parsed_candidate(raw_text, confidence)
-
-    if not raw_text.strip():
-        backend_status = {
-            "google": bool(GOOGLE_KEY),
-            "azure": bool(AZURE_DOCINT_ENDPOINT and AZURE_DOCINT_KEY),
-            "rapidocr": _rapid_ocr_engine is not None,
-        }
-        raise HTTPException(
-            status_code=422,
-            detail=f"No readable text detected. Try a clearer image or re-upload a sharper receipt. OCR backends: {backend_status}",
-        )
-
-    # Parse structured data from raw text
-    if not parsed:
-        parsed = parse_receipt(raw_text, confidence)
-    parsed["image_hash"] = image_hash
-
-    # Flag for manual review only for truly weak outcomes.
-    critical_low = parsed.get("low_confidence_fields") or []
-    needs_review = (confidence < 0.65) or (len(critical_low) > 0)
+    fraud = await _fraud_precheck(image_hash, normalized)
+    needs_review = bool(normalized.get("math_mismatch")) or float(normalized.get("confidence") or 0) < 0.65 or float(fraud.get("fraud_score") or 0) >= 0.35
+    normalized["fraud_score"] = fraud.get("fraud_score")
+    normalized["fraud_reason"] = fraud.get("fraud_reason")
     if needs_review:
-        parsed["review_flag"] = f"OCR confidence {confidence * 100:.1f}% — below 95% threshold, please verify extracted values"
+        normalized["review_flag"] = "Manual review recommended"
 
     response_payload = {
-        "success":      True,
-        "data":         parsed,
-        "image_hash":   image_hash,
+        "success": True,
+        "data": normalized,
+        "image_hash": image_hash,
         "needs_review": needs_review,
-        "file_type":    content_type or "unknown",
-        "cached":       False,
+        "file_type": content_type or "unknown",
+        "cached": False,
+        "method": "Hybrid OCR",
     }
+
     _cache_set(image_hash, response_payload)
+    _append_compliance_log({
+        "event": "parse_receipt",
+        "image_hash": image_hash,
+        "file_type": response_payload["file_type"],
+        "needs_review": needs_review,
+        "math_mismatch": bool(normalized.get("math_mismatch")),
+        "fraud_score": normalized.get("fraud_score"),
+        "merchant": normalized.get("merchant"),
+        "date": normalized.get("date"),
+        "total": normalized.get("total"),
+        "page_count_processed": normalized.get("page_count_processed"),
+    })
     return response_payload
+
+
+@app.post("/extract")
+async def extract_receipt(file: UploadFile = File(...)):
+    """Backward-compatible alias for legacy clients."""
+    return await parse_receipt_endpoint(file)
 
 
 @app.get("/health")
@@ -785,6 +948,8 @@ async def health():
         "rapidocr": "configured" if _rapid_ocr_engine is not None else "not_installed",
         "ocr_mode": OCR_MODE,
         "cache_size": len(_ocr_result_cache),
+        "max_pdf_pages": MAX_PDF_PAGES,
+        "compliance_log_path": COMPLIANCE_LOG_PATH,
         "formats":     list(SUPPORTED_FORMATS.keys()),
     }
 

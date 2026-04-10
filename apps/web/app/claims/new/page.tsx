@@ -4,6 +4,7 @@ import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@clerk/nextjs'
 import { claimsApi, setAuthToken, usersApi } from '@/lib/api'
+import { useReceiptParser } from '@/lib/useReceiptParser'
 import { Upload, CheckCircle, Loader, AlertCircle, ArrowLeft, Zap, Camera } from 'lucide-react'
 import Link from 'next/link'
 
@@ -41,7 +42,7 @@ export default function NewClaimPage() {
   const [warning, setWarning] = useState('')
   const [fraudBlocked, setFraudBlocked] = useState(false)
   const [file, setFile] = useState<File | null>(null)
-  const [ocrLoading, setOcrLoading] = useState(false)
+  const { parseReceipt, processing: ocrLoading } = useReceiptParser(ocrBaseCandidates)
   const [form, setForm] = useState({
     merchant_name: '', expense_date: '', category: 'other',
     subtotal: '', tax_amount: '', discount_amount: '', total_amount: '', notes: '',
@@ -98,7 +99,6 @@ export default function NewClaimPage() {
       return
     }
     // OCR via backend
-    setOcrLoading(true)
     try {
       const token = await getToken()
       if (!token) {
@@ -106,28 +106,20 @@ export default function NewClaimPage() {
         return
       }
       setAuthToken(token)
-      const fd = new FormData()
-      fd.append('file', f)
-      const res = await fetchWithFallback(ocrBaseCandidates, '/extract', {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        setError(err.detail || 'Receipt unreadable. Upload a clearer image (good lighting, full bill visible) or fill manually.')
-        return
-      }
-
-      const data = await res.json()
+      const data = await parseReceipt(f, token)
       if (!data.success) {
-        setError(data.error || 'OCR could not read this receipt. Please try a clearer image or fill the form manually.')
+        setError(data.error || 'AI OCR could not read this receipt. Please ensure it is a clear scan of a valid document.')
         return
       }
 
       const d = data.data || {}
-      if (d.merchant_name) set('merchant_name', d.merchant_name)
-      if (d.expense_date)  set('expense_date',  d.expense_date)
+      const parsedMerchant = d.merchant_name || d.merchant
+      const parsedDate = d.expense_date || d.date
+      if (parsedMerchant) set('merchant_name', parsedMerchant)
+      if (parsedDate)  set('expense_date', parsedDate)
       if (d.subtotal !== undefined && d.subtotal !== null) set('subtotal', String(d.subtotal))
       if (d.tax_amount !== undefined && d.tax_amount !== null) set('tax_amount', String(d.tax_amount))
+      else if (d.tax !== undefined && d.tax !== null) set('tax_amount', String(d.tax))
       if (d.discount_amount !== undefined && d.discount_amount !== null) set('discount_amount', String(d.discount_amount))
       if (d.total !== undefined && d.total !== null) set('total_amount', String(d.total))
       if (d.category) set('category', d.category)
@@ -160,7 +152,7 @@ export default function NewClaimPage() {
       const lowFields = Array.isArray(d.low_confidence_fields) ? d.low_confidence_fields : []
       const criticalLowFields = lowFields.filter((f: string) => ['merchant_name', 'expense_date', 'subtotal', 'tax_amount', 'total'].includes(f))
       const overallConfidence = Number(d.confidence ?? 0)
-      if (data.needs_review || d.review_flag || overallConfidence < 0.6 || criticalLowFields.length) {
+      if (data.needs_review || d.review_flag || d.math_mismatch || overallConfidence < 0.6 || criticalLowFields.length) {
         const suffix = lowFields.length ? ` Low-confidence fields: ${lowFields.map((f: string) => f.replace(/_/g, ' ')).join(', ')}.` : ''
         setWarning(`Receipt detected with low confidence. Please verify amounts before submit.${suffix}`)
       }
@@ -201,8 +193,6 @@ export default function NewClaimPage() {
       }
     } catch {
       setError('Unable to process this file right now. Please retry once.')
-    } finally {
-      setOcrLoading(false)
     }
   }
 

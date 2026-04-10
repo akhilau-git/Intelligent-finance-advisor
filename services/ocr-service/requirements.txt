@@ -8,5 +8,8 @@ pdf2image==1.17.0
 python-multipart==0.0.9
 pytesseract==0.3.10
 pypdf==4.2.0
+pymupdf==1.24.14
 anthropic==0.21.3
+google-generativeai==0.8.6
+pdfplumber==0.11.9
 rapidocr-onnxruntime==1.4.4
