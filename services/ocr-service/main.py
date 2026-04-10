@@ -616,10 +616,11 @@ def _ensemble_fields(candidates: list[tuple[float, str, float, dict]]) -> dict:
     return {k: v for k, v in consensus.items() if v is not None}
 
 
-def _calc_math_mismatch(subtotal: float | None, tax_amount: float | None, total: float | None) -> bool:
+def _calc_math_mismatch(subtotal: float | None, tax_amount: float | None, total: float | None, discount_amount: float | None = None) -> bool:
     if subtotal is None or tax_amount is None or total is None:
         return False
-    expected = round(float(subtotal) + float(tax_amount), 2)
+    discount = float(discount_amount or 0)
+    expected = round(float(subtotal) + float(tax_amount) - discount, 2)
     return abs(expected - float(total)) > max(1.0, expected * 0.02)
 
 
@@ -654,6 +655,7 @@ def _normalize_parse_response(parsed: dict, raw_text: str, confidence: float, im
     date = parsed.get("date") or parsed.get("expense_date")
     subtotal = parsed.get("subtotal")
     tax = parsed.get("tax") if parsed.get("tax") is not None else parsed.get("tax_amount")
+    discount_amount = parsed.get("discount_amount")
     total = parsed.get("total")
 
     normalized = {
@@ -661,12 +663,13 @@ def _normalize_parse_response(parsed: dict, raw_text: str, confidence: float, im
         "date": date,
         "subtotal": subtotal,
         "tax": tax,
+        "discount_amount": discount_amount,
         "total": total,
         # Compatibility keys used by existing UI/state shape.
         "merchant_name": merchant,
         "expense_date": date,
         "tax_amount": tax,
-        "math_mismatch": _calc_math_mismatch(subtotal, tax, total),
+        "math_mismatch": _calc_math_mismatch(subtotal, tax, total, discount_amount),
         "raw_text": raw_text,
         "confidence": confidence,
         "image_hash": image_hash,

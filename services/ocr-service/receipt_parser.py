@@ -123,6 +123,79 @@ def _extract_vat_summary(lines: list[str]) -> tuple[Optional[float], Optional[fl
     return best_subtotal, best_tax, best_rate
 
 
+def _extract_invoice_summary(lines: list[str]) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """
+    Parse invoice summary rows such as:
+    - T.A. ... 55192.00
+    - DISCOUNT 10.00% 5969.20
+    - GRAND TOTAL 53722.80
+
+    Returns: (pre_discount_total, discount_amount, discount_rate_pct, grand_total)
+    """
+    pre_discount_total: Optional[float] = None
+    discount_amount: Optional[float] = None
+    discount_rate: Optional[float] = None
+    grand_total: Optional[float] = None
+
+    for line in lines:
+        lowered = line.lower()
+        vals = _line_amounts(line)
+        if not vals:
+            continue
+
+        if any(k in lowered for k in ["grand total", "net payable", "amount payable", "total payable"]):
+            grand_total = vals[-1]
+            continue
+
+        if ("discount" in lowered or "less" in lowered) and discount_amount is None:
+            discount_amount = vals[-1]
+            discount_rate = _find_percentage(line)
+            continue
+
+        if any(k in lowered for k in ["t.a", "taxable total", "total before discount", "amount before discount"]):
+            pre_discount_total = vals[-1]
+
+    return pre_discount_total, discount_amount, discount_rate, grand_total
+
+
+def _repair_amount_consistency(result: dict, amounts: list[float]) -> None:
+    """Repair inconsistent amount triplets for noisy OCR invoices without overfitting."""
+    subtotal = result.get("subtotal")
+    tax_amount = result.get("tax_amount")
+    total = result.get("total")
+    discount = result.get("discount_amount") or 0.0
+
+    if subtotal is None or tax_amount is None or total is None:
+        return
+
+    expected = round(float(subtotal) + float(tax_amount) - float(discount), 2)
+    if abs(expected - float(total)) <= max(2.0, expected * 0.03):
+        return
+
+    rationale = result.get("rationale") or {}
+    subtotal_source = str(rationale.get("subtotal", "")).lower()
+    has_strong_subtotal_evidence = any(k in subtotal_source for k in ["vat summary", "subtotal", "invoice total-before-discount"])
+
+    # Prefer candidate totals that satisfy current subtotal/tax/discount first.
+    for candidate_total in amounts:
+        if abs((float(subtotal) + float(tax_amount) - float(discount)) - candidate_total) <= 1.0:
+            result["total"] = candidate_total
+            return
+
+    # Then try subtotal correction while preserving tax/discount/total.
+    for candidate_sub in amounts:
+        if abs((candidate_sub + float(tax_amount) - float(discount)) - float(total)) <= 1.0:
+            result["subtotal"] = candidate_sub
+            return
+
+    # Last fallback: derive subtotal only when there is no stronger subtotal evidence.
+    if has_strong_subtotal_evidence:
+        return
+    derived_sub = round(float(total) - float(tax_amount) + float(discount), 2)
+    if derived_sub > 0:
+        result["subtotal"] = derived_sub
+
+
 def _humanize_charge_label(label: str) -> str:
     return label.replace("_", " ").strip().title()
 
@@ -326,9 +399,11 @@ def extract_amounts(text: str) -> dict:
     vat_sub, vat_tax, vat_rate = _extract_vat_summary(lines)
     if not result["subtotal"] and vat_sub is not None:
         result["subtotal"] = vat_sub
+        result["rationale"]["subtotal"] = "VAT summary row"
     if vat_tax is not None:
         if result["tax_amount"] is None:
             result["tax_amount"] = vat_tax
+            result["rationale"]["tax_amount"] = "VAT summary row"
         elif result["subtotal"] and result["total"]:
             current_gap = abs((result["subtotal"] + result["tax_amount"]) - result["total"])
             vat_gap = abs((result["subtotal"] + vat_tax) - result["total"])
@@ -336,6 +411,22 @@ def extract_amounts(text: str) -> dict:
                 result["tax_amount"] = vat_tax
     if not result["tax_rate"] and vat_rate is not None:
         result["tax_rate"] = vat_rate
+
+    # Invoice summary row extraction (important for wholesale/table bills).
+    pre_discount_total, inv_discount_amount, inv_discount_rate, invoice_grand_total = _extract_invoice_summary(lines)
+    if invoice_grand_total is not None:
+        result["total"] = invoice_grand_total
+        result["rationale"]["total"] = "Invoice grand total line"
+    if result["discount_amount"] is None and inv_discount_amount is not None:
+        result["discount_amount"] = inv_discount_amount
+    if result["discount_rate"] is None and inv_discount_rate is not None:
+        result["discount_rate"] = inv_discount_rate
+
+    if pre_discount_total is not None and result["subtotal"] is None and result["tax_amount"] is not None:
+        derived_sub = round(pre_discount_total - float(result["tax_amount"]), 2)
+        if derived_sub > 0:
+            result["subtotal"] = derived_sub
+            result["rationale"]["subtotal"] = "Invoice total-before-discount line"
 
     # Fallback: use the largest reliable amount as total.
     # Keep discount / percentage lines from polluting the amount inference.
@@ -359,25 +450,8 @@ def extract_amounts(text: str) -> dict:
     if result["subtotal"] and result["total"] and not result["tax_amount"] and "subtotal" in result["rationale"]:
         result["tax_amount"] = round(result["total"] - result["subtotal"] + (result["discount_amount"] or 0), 2)
     
-    # Universal Math Correction: If we have multiple candidates, find the one that fits: Sub + Tax - Disc = Total
-    # This is critical for complex receipts like the Rajendra Traders one.
-    if result["total"] and result["subtotal"] and result["tax_amount"]:
-        sub_val = result["subtotal"]
-        tax_val = result["tax_amount"]
-        disc_val = result["discount_amount"] or 0
-        tot_val = result["total"]
-        
-        # If mismatch is significant, look for other candidate amounts in the text
-        if abs(sub_val + tax_val - disc_val - tot_val) > 1.0:
-            for amt in amounts:
-                # Try replacing subtotal with this amount to see if it fixes the math
-                if abs(amt + tax_val - disc_val - tot_val) < 0.5:
-                    result["subtotal"] = amt
-                    break
-                # Try replacing total
-                if abs(sub_val + tax_val - disc_val - amt) < 0.5:
-                    result["total"] = amt
-                    break
+    # Repair math consistency for difficult OCR invoices.
+    _repair_amount_consistency(result, amounts)
     
     if result["subtotal"] and result["tax_amount"] and not result["total"]:
         result["total"] = round(result["subtotal"] + result["tax_amount"] - (result["discount_amount"] or 0), 2)
@@ -436,7 +510,7 @@ def extract_merchant(text: str) -> Optional[str]:
             cleaned = re.sub(r"[^a-zA-Z0-9\s\.-]", "", cleaned)
             cleaned = re.sub(r"\s+", " ", cleaned).strip()
             if len(cleaned) > 3:
-                return cleaned[:100]
+                return _normalize_merchant_name(cleaned[:100])
 
     # Priority 2: First meaningful line that isn't just symbols or numbers
     for line in lines[:5]:
@@ -449,9 +523,31 @@ def extract_merchant(text: str) -> Optional[str]:
             cleaned = re.sub(r"\s+", " ", line).strip()
             if cleaned.lower() in skip_merchant_line_keywords:
                 continue
-            return cleaned[:100]
+            return _normalize_merchant_name(cleaned[:100])
             
     return None
+
+
+def _normalize_merchant_name(name: str) -> str:
+    """Improve readability of OCR merchant names without aggressive rewriting."""
+    n = re.sub(r"\s+", " ", name).strip()
+    n = n.upper()
+
+    # Common suffix normalization to avoid merged tokens like RAJENDRATRADE.
+    suffix_map = {
+        "TRADERS": "TRADERS",
+        "TRADER": "TRADER",
+        "ENTERPRISE": "ENTERPRISE",
+        "ENTERPRISES": "ENTERPRISES",
+        "STORE": "STORE",
+        "MART": "MART",
+    }
+    for suffix, token in suffix_map.items():
+        if n.endswith(suffix) and (" " + suffix) not in n:
+            prefix = n[: -len(suffix)].strip()
+            if prefix:
+                return f"{prefix} {token}"[:100]
+    return n[:100]
 
 
 # ── Date extraction ──────────────────────────────────────────────────────────
@@ -600,6 +696,38 @@ def _clamp(val: float, min_v: float = 0.0, max_v: float = 0.99) -> float:
     return max(min_v, min(max_v, val))
 
 
+def refine_with_regex(text: str, current_data: dict) -> dict:
+    """Enterprise-Grade regex layer to double-check and fix AI/OCR detections."""
+    # Merchant Name: look for "Invoice From", "Merchant", or prominent header text
+    if not current_data.get("merchant_name"):
+        merchant_match = re.search(r"(?:Merchant|Vendor|Invoice\s+From)[:\-]?\s*(.*)", text, re.IGNORECASE)
+        if merchant_match:
+            current_data["merchant_name"] = merchant_match.group(1).split("\n")[0].strip()[:100]
+
+    # Date: match common dd-mm-yyyy or mm/dd/yyyy
+    if not current_data.get("expense_date"):
+        date_match = re.search(r"(\d{2}[-/\.]\d{2}[-/\.]\d{4})", text)
+        if date_match:
+            # Simple conversion to YYYY-MM-DD
+            raw_d = date_match.group(1).replace("/", "-").replace(".", "-")
+            parts = raw_d.split("-")
+            if len(parts) == 3:
+                if len(parts[2]) == 4: # DD-MM-YYYY
+                    current_data["expense_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                elif len(parts[0]) == 4: # YYYY-MM-DD
+                    current_data["expense_date"] = f"{parts[0]}-{parts[1]}-{parts[2]}"
+
+    # Totals: look for currency symbols or "Total" keywords
+    if not current_data.get("total"):
+        total_match = re.search(r"Total\s*[:\-]?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
+        if total_match:
+            val = _to_money(total_match.group(1))
+            if val:
+                current_data["total"] = val
+
+    return current_data
+
+
 def _compute_field_confidence(amounts: dict, merchant: Optional[str], expense_date: Optional[str], ocr_confidence: float, document_type: str = "general_receipt") -> tuple[dict[str, float], list[str]]:
     rationale = amounts.get("rationale") or {}
     subtotal = amounts.get("subtotal")
@@ -681,7 +809,8 @@ def parse_receipt(raw_text: str, confidence: float = 0.97) -> dict:
     total = amounts.get("total") or 0
     field_confidence, low_confidence_fields = _compute_field_confidence(amounts, merchant, expense_date, confidence, document_type)
 
-    return {
+    # Final refinement layer using Enterprise Regex patterns
+    result = refine_with_regex(raw_text, {
         "document_type": document_type,
         "merchant_name":  merchant,
         "merchant_id":    extract_gst(raw_text),
@@ -708,4 +837,6 @@ def parse_receipt(raw_text: str, confidence: float = 0.97) -> dict:
         "low_confidence_fields": low_confidence_fields,
         "confidence":     confidence,
         "raw_text_snippet": raw_text[:300],
-    }
+    })
+    
+    return result
