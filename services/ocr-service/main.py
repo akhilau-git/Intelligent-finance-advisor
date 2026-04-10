@@ -703,16 +703,27 @@ async def _parse_document(contents: bytes, content_type: str, filename: str, ima
         native_text, native_conf = extract_text_pdf_native(contents)
         raw_text, confidence = native_text, native_conf
 
-        # OCR each page asynchronously and merge strongest fields.
-        tasks = [extract_best_text(img) for img in page_images]
-        page_ocr_results = await asyncio.gather(*tasks, return_exceptions=True)
         page_results: list[tuple[int, str, float, dict]] = []
-        for idx, item in enumerate(page_ocr_results):
-            if isinstance(item, Exception):
-                continue
-            text_i, conf_i, parsed_i = item
-            if text_i or parsed_i:
-                page_results.append((idx + 1, text_i, conf_i, parsed_i or {}))
+
+        # Progressive OCR: fast early pages first, then continue only if still uncertain.
+        batch_size = 3
+        for start in range(0, len(page_images), batch_size):
+            batch = page_images[start:start + batch_size]
+            batch_tasks = [extract_best_text(img) for img in batch]
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+            for offset, item in enumerate(batch_results):
+                if isinstance(item, Exception):
+                    continue
+                text_i, conf_i, parsed_i = item
+                if text_i or parsed_i:
+                    page_idx = start + offset + 1
+                    page_results.append((page_idx, text_i, conf_i, parsed_i or {}))
+
+            if page_results:
+                _, _, preview_parsed = _merge_page_parsed(page_results)
+                if _is_strong_candidate(preview_parsed, float(preview_parsed.get("confidence") or 0.9)):
+                    break
 
         if page_results:
             merged_text, merged_conf, merged_parsed = _merge_page_parsed(page_results)

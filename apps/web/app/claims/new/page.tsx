@@ -3,7 +3,7 @@
 import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@clerk/nextjs'
-import { claimsApi, setAuthToken, usersApi } from '@/lib/api'
+import { setAuthToken, usersApi } from '@/lib/api'
 import { useReceiptParser } from '@/lib/useReceiptParser'
 import { Upload, CheckCircle, Loader, AlertCircle, ArrowLeft, Zap, Camera } from 'lucide-react'
 import Link from 'next/link'
@@ -20,6 +20,13 @@ const CATS = [
 ]
 
 export default function NewClaimPage() {
+  const apiBaseCandidates = [
+    process.env.NEXT_PUBLIC_API_URL,
+    'http://127.0.0.1:8010',
+    'http://localhost:8010',
+    'http://127.0.0.1:8000',
+    'http://localhost:8000',
+  ].filter(Boolean) as string[]
   const ocrBaseCandidates = [
     process.env.NEXT_PUBLIC_OCR_URL,
     'http://127.0.0.1:8012',
@@ -73,6 +80,25 @@ export default function NewClaimPage() {
   const discount = parseFloat(form.discount_amount) || 0
   const tot = parseFloat(form.total_amount) || 0
   const mathOk = tot === 0 || Math.abs(sub + tax - discount - tot) < 0.5
+
+  const normalizeDateForApi = (raw: string): string | null => {
+    if (!raw) return null
+    const value = raw.trim()
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value
+
+    const sep = value.includes('/') ? '/' : '-'
+    if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(value)) {
+      const parts = value.split(sep)
+      const d = Number(parts[0])
+      const m = Number(parts[1])
+      let y = Number(parts[2])
+      if (y < 100) y += y < 70 ? 2000 : 1900
+      if (y >= 2000 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        return `${y.toString().padStart(4, '0')}-${m.toString().padStart(2, '0')}-${d.toString().padStart(2, '0')}`
+      }
+    }
+    return null
+  }
 
   const fetchWithFallback = async (bases: string[], path: string, options: RequestInit): Promise<Response> => {
     let lastError: unknown = null
@@ -157,8 +183,17 @@ export default function NewClaimPage() {
         setWarning(`Receipt detected with low confidence. Please verify amounts before submit.${suffix}`)
       }
 
+      // Prefer backend fraud score from parse-receipt to avoid extra latency.
+      const backendFraudScore = Number(d.fraud_score || 0)
+      if (backendFraudScore >= 0.6) {
+        setFraudBlocked(true)
+        setError('Potential fake/duplicate receipt detected. Please upload an original clear receipt or contact auditor.')
+      } else if (backendFraudScore >= 0.35) {
+        setWarning('Receipt flagged for manual review by fraud checks. You can submit, but it may go to review status.')
+      }
+
       // Fraud pre-check on upload (duplicate / fake pattern warning)
-      try {
+      if (d.fraud_score === undefined || d.fraud_score === null) try {
         const me = await usersApi.getMe()
         const employeeId = me?.data?.user?.id
         if (employeeId) {
@@ -201,17 +236,61 @@ export default function NewClaimPage() {
     if (!form.merchant_name) { setError('Merchant name is required'); return }
     if (!form.total_amount)  { setError('Total amount is required'); return }
     if (!mathOk)             { setError('Subtotal + Tax - Discount does not equal Total — please recheck'); return }
+    const normalizedExpenseDate = normalizeDateForApi(form.expense_date)
+    if (form.expense_date && !normalizedExpenseDate) {
+      setError('Invalid date format from OCR. Please pick a valid date before submitting.')
+      return
+    }
+
     setError('')
     setLoading(true)
     try {
       const token = await getToken()
       if (!token) { setError('Not authenticated'); setLoading(false); return }
       setAuthToken(token)
-      await claimsApi.create({ ...form, subtotal: sub, tax_amount: tax, total_amount: tot, status: 'submitted' })
+
+      const payload = {
+        ...form,
+        expense_date: normalizedExpenseDate,
+        subtotal: sub,
+        tax_amount: tax,
+        total_amount: tot,
+        status: 'submitted',
+      }
+
+      let submitted = false
+      let submitErr: unknown = null
+      for (const base of apiBaseCandidates) {
+        try {
+          await fetch(`${base}/claims/`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(payload),
+          }).then(async res => {
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}))
+              throw new Error(typeof body?.detail === 'string' ? body.detail : `Claim API error (${res.status})`)
+            }
+          })
+          submitted = true
+          break
+        } catch (err) {
+          submitErr = err
+        }
+      }
+
+      if (!submitted) {
+        throw submitErr || new Error('Claim submission endpoints not reachable')
+      }
+
       setSuccess(true)
       setTimeout(() => router.push('/claims'), 1800)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Submission failed. Please try again.')
+      const detail = e?.message || e?.response?.data?.detail
+      setError(typeof detail === 'string' ? detail : 'Submission failed. Please try again.')
     } finally { setLoading(false) }
   }
 
