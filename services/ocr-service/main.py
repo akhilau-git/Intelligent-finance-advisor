@@ -10,9 +10,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from receipt_parser import parse_receipt
 import os, hashlib, base64, io, re, asyncio, httpx, json
+import warnings
 from copy import deepcopy
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import pytesseract  # type: ignore[import-not-found]
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"[\s\S]*google\.generativeai[\s\S]*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"[\s\S]*ARC4 has been moved[\s\S]*",
+)
+
 from pypdf import PdfReader
 import fitz
 import pdfplumber

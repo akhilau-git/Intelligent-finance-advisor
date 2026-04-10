@@ -15,8 +15,9 @@ Problem Statement 11 | Balfour Beatty | U Akhila, ATME College of Engineering
 | Triple-Check Validation | OCR vs user input vs Tax API — `analytics.py /triple-check/{id}` |
 | Regulatory-as-Code | Policies in DB, enforced in `claims.py` auto-approve logic |
 | Immutable Trust Architecture | SHA-256 hash chain in `audit_log` table |
-| Asynchronous AI Processing | Background OCR via separate service on port 8002 |
-| Auto-reads bills (PDF/JPG/PNG) | Google Cloud Vision API in OCR service |
+| Asynchronous AI Processing | Background OCR via multi-engine service on port 8002 |
+| Auto-reads bills (PDF/JPG/PNG) | Google Vision + Gemini 1.5 Document AI |
+| Multi-Page Support | Processes up to 5 pages using `pdfplumber` |
 
 ---
 
@@ -73,13 +74,15 @@ cd services\ocr-service
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --host 127.0.0.1 --port 8012
+uvicorn main:app --host 127.0.0.1 --port 8012
 ```
 ✅ Open: http://localhost:8002/docs
 
 **This is the service that auto-reads your bills:**
 - Upload any PDF, JPG, PNG, WEBP, TIFF
-- Google Vision API extracts: merchant name, date, GST amount, total, tax
+- Powered by: Google Vision + **Gemini 1.5 Flash Document AI**
+- Extracts: merchant name, date, GST amount, total, tax, and line items
+- Handles: Handwritten receipts, ticket PNRs, and multi-page utility bills
 - Category auto-detected (travel/meals/hotel/etc)
 - Carbon footprint auto-calculated
 
@@ -129,7 +132,7 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8010
 cd services\ocr-service
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --host 127.0.0.1 --port 8012
+uvicorn main:app --host 127.0.0.1 --port 8012
 ```
 ✅ Open: http://localhost:8012/docs
 
@@ -199,17 +202,16 @@ When you go to **Submit Claim** and upload any bill:
 ```
 PDF/JPG/PNG/WEBP uploaded
         ↓
-OCR Service (port 8002 or 8012 if using alternate ports)
+OCR Service (port 8002 or 8012)
         ↓
-Google Cloud Vision API reads text
+Google Vision + pdfplumber (Multi-page)
         ↓
-receipt_parser.py extracts:
-  • Merchant name
-  • Date
-  • GST number
-  • Subtotal / Tax / Total
-  • Category (travel/meals/hotel...)
-  • Carbon footprint
+Gemini 1.5 AI Parser Logic:
+  • Merchant & Date detection
+  • GST / Tax breakdown
+  • Subtotal / Discount / Total
+  • Ticket PNRs & Service IDs
+  • Category & ESG Carbon score
         ↓
 Form auto-filled in browser
         ↓
@@ -254,9 +256,9 @@ Auto-approved if clean + under ₹5,000
 | 401 Unauthorized | Sign out and back in. Token expired. |
 | Table doesn't exist | Run SQL migrations in Supabase first |
 | WinError 10013 / Port in use | Stop Docker service on same port: `docker compose stop web api-gateway fraud-service ocr-service` OR change to alternate ports in Step 3.5 |
-| OCR returns empty | Check `GOOGLE_CLOUD_VISION_KEY` in `services/ocr-service/.env`. Optional second provider: set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`, `AZURE_DOCUMENT_INTELLIGENCE_KEY`, and optionally `AZURE_DOCUMENT_INTELLIGENCE_MODEL` (default `prebuilt-receipt`). |
+| OCR returns empty | Check `GOOGLE_CLOUD_VISION_KEY` and `GEMINI_API_KEY` in `services/ocr-service/.env`. |
 | PDF shows "Uploaded file is empty" | Re-export or re-download PDF, then upload again |
-| PDF is slow | Text PDFs are now fast-path parsed; scanned PDFs still use OCR and can take longer |
+| PDF is slow | Multi-page PDFs use Document AI; up to 5 pages are processed sequentially |
 
 ---
 
