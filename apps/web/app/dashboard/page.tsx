@@ -60,8 +60,8 @@ export default function DashboardPage() {
     <div className="fade-in" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
       {/* ── Page header ── */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{
+      <div className="dashboard-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="dashboard-hero" style={{
           background: 'rgba(13,18,48,0.6)',
           border: '1px solid rgba(139,92,246,0.15)',
           borderLeft: '3px solid #8B5CF6',
@@ -70,18 +70,18 @@ export default function DashboardPage() {
           <h1 style={{ fontSize: 20, fontWeight: 800, color: '#F0F2FF', letterSpacing: '-0.02em' }}>Dashboard Overview</h1>
           <p style={{ fontSize: 11, color: 'rgba(156,163,192,0.7)', marginTop: 4 }}>Real-time financial tracking &amp; automated AI audits.</p>
         </div>
-        <Link href="/claims/new" style={{ textDecoration: 'none', flexShrink: 0 }}>
-          <button className="btn-primary" style={{ padding: '10px 18px' }}>
+        <Link href="/claims/new" className="dashboard-cta-link" style={{ textDecoration: 'none', flexShrink: 0 }}>
+          <button className="btn-primary dashboard-cta" style={{ padding: '10px 18px' }}>
             <Zap size={14} /> SUBMIT / FINANCE CLAIM
           </button>
         </Link>
       </div>
 
       {/* ── Top row: 4 stat cards + AI Fraud ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 380px', gap: 12 }}>
+      <div className="dashboard-top-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 380px', gap: 12 }}>
 
         {/* Stat card 1 — TOTAL REIMBURSED */}
-        <div className="card" style={{ padding: 16, gridColumn: '1/3', borderLeft: '2px solid rgba(245,166,35,0.4)' }}>
+        <div className="card stat-reimbursed" style={{ padding: 16, gridColumn: '1/3', borderLeft: '2px solid rgba(245,166,35,0.4)' }}>
           <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(75,82,128,0.8)' }}>
             TOTAL REIMBURSED
           </p>
@@ -102,7 +102,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stat card 2 — FRAUD FLAGS */}
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card stat-fraud" style={{ padding: 16 }}>
           <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(75,82,128,0.8)' }}>FRAUD FLAGS</p>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
             <p style={{ fontSize: 28, fontWeight: 900, color: stats?.fraud_flags ? '#FCA5A5' : '#F0F2FF', letterSpacing: '-0.03em' }}>
@@ -113,25 +113,25 @@ export default function DashboardPage() {
             </div>
           </div>
           <p style={{ fontSize: 10, color: 'rgba(75,82,128,0.7)', marginTop: 8 }}>
-            {stats?.fraud_flags === 0 ? 'No suspicious activity' : `${stats?.fraud_flags} flagged`}
+            {loading ? 'Analyzing risk signals...' : (stats?.fraud_flags ?? 0) === 0 ? 'No suspicious activity' : `${stats?.fraud_flags} flagged`}
           </p>
         </div>
 
         {/* Stat card 3 — APPROVED */}
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card stat-approved" style={{ padding: 16 }}>
           <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(75,82,128,0.8)' }}>APPROVED</p>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
             <p style={{ fontSize: 28, fontWeight: 900, color: '#34D399', letterSpacing: '-0.03em' }}>
               {loading ? '—' : stats?.approved ?? 0}
             </p>
-            <div style={{ width: 36, height: 36, background: 'rgba(239,68,68,0.12)', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <XCircle size={18} style={{ color: '#EF4444' }} />
+            <div style={{ width: 36, height: 36, background: 'rgba(16,185,129,0.12)', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <CheckCircle2 size={18} style={{ color: '#10B981' }} />
             </div>
           </div>
         </div>
 
         {/* AI Fraud Analysis panel (right, spans 2 rows) */}
-        <div className="card-glow" style={{ padding: 18, gridRow: '1/3', gridColumn: '5/6', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="card-glow panel-ai" style={{ padding: 18, gridRow: '1/3', gridColumn: '5/6', display: 'flex', flexDirection: 'column', gap: 12 }}>
           <p style={{ fontSize: 16, fontWeight: 800, color: '#F0F2FF' }}>AI Fraud Analysis</p>
 
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 10, padding: '10px 12px' }}>
@@ -140,7 +140,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <p style={{ fontSize: 13, fontWeight: 700, color: '#F0F2FF', lineHeight: 1.3 }}>
-                {stats?.fraud_flags || 0} Suspicious Claims Detected
+                {loading ? 'Scanning recent claims...' : `${stats?.fraud_flags || 0} Suspicious Claims Detected`}
               </p>
             </div>
           </div>
@@ -190,7 +190,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stat card 4 — TOTAL CLAIMS */}
-        <div className="card" style={{ padding: 16, gridColumn: '1/2' }}>
+        <div className="card stat-total" style={{ padding: 16, gridColumn: '1/2' }}>
           <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(75,82,128,0.8)' }}>TOTAL CLAIMS</p>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
             <p style={{ fontSize: 28, fontWeight: 900, color: '#F0F2FF', letterSpacing: '-0.03em' }}>
@@ -203,7 +203,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stat card 5 — PENDING REVIEW */}
-        <div className="card" style={{ padding: 16, gridColumn: '2/3' }}>
+        <div className="card stat-pending" style={{ padding: 16, gridColumn: '2/3' }}>
           <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(75,82,128,0.8)' }}>PENDING REVIEW</p>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
             <p style={{ fontSize: 28, fontWeight: 900, color: '#FCD34D', letterSpacing: '-0.03em' }}>
@@ -216,18 +216,21 @@ export default function DashboardPage() {
         </div>
 
         {/* Stat card 6 — REJECTED */}
-        <div className="card" style={{ padding: 16, gridColumn: '3/5' }}>
+        <div className="card stat-rejected" style={{ padding: 16, gridColumn: '3/5' }}>
           <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(75,82,128,0.8)' }}>REJECTED</p>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
             <p style={{ fontSize: 28, fontWeight: 900, color: '#FCA5A5', letterSpacing: '-0.03em' }}>
               {loading ? '—' : stats?.rejected ?? 0}
             </p>
+            <div style={{ width: 36, height: 36, background: 'rgba(239,68,68,0.12)', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <XCircle size={18} style={{ color: '#EF4444' }} />
+            </div>
           </div>
         </div>
       </div>
 
       {/* ── Bottom row: Recent Claims + Total Claims breakdown ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: 12 }}>
+      <div className="dashboard-bottom-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: 12 }}>
 
         {/* Recent Claims table */}
         <div className="card" style={{ overflow: 'hidden' }}>
@@ -261,8 +264,8 @@ export default function DashboardPage() {
                     <td className="table-td" style={{ textTransform: 'capitalize' }}>{c.category}</td>
                     <td className="table-td"><span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, fontWeight: 700, color: '#F0F2FF' }}>{formatCurrency(c.total_amount || 0)}</span></td>
                     <td className="table-td">
-                      <span className={`badge badge-${c.status === 'approved' ? 'approved' : c.status === 'rejected' || c.fraud_score > 0.5 ? 'flagged' : c.status === 'validated' ? 'verified' : 'pending'}`}>
-                        {c.fraud_score > 0.5 ? 'Flagged' : c.status === 'approved' ? 'Verified' : c.status === 'validated' ? 'Verified' : 'Pending'}
+                      <span className={`badge badge-${c.status === 'approved' ? 'approved' : c.status === 'rejected' ? 'rejected' : c.fraud_score > 0.5 ? 'flagged' : c.status === 'validated' ? 'verified' : 'pending'}`}>
+                        {c.status === 'rejected' ? 'Rejected' : c.fraud_score > 0.5 ? 'Flagged' : c.status === 'approved' ? 'Approved' : c.status === 'validated' ? 'Verified' : 'Pending'}
                       </span>
                     </td>
                     <td className="table-td" style={{ fontSize: 11 }}>{c.expense_date ? formatDate(c.expense_date) : '—'}</td>
@@ -283,8 +286,8 @@ export default function DashboardPage() {
           {[
             { icon: '⊙', label: 'VERIFIED',  color: '#10B981', count: stats?.approved ?? 0 },
             { icon: '⚠', label: 'PENDING',   color: '#F59E0B', count: stats?.pending ?? 0 },
-            { icon: '✗', label: 'MISC',      color: '#8B5CF6', count: stats?.rejected ?? 0 },
-            { icon: '✓', label: 'MERCHANTS', color: '#14B8A6', count: stats?.total ?? 0 },
+            { icon: '✗', label: 'REJECTED',  color: '#FCA5A5', count: stats?.rejected ?? 0 },
+            { icon: '∑', label: 'TOTAL',     color: '#14B8A6', count: stats?.total ?? 0 },
           ].map(item => (
             <div key={item.label} style={{
               display: 'flex', alignItems: 'center', gap: 8,

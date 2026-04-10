@@ -194,7 +194,7 @@ export default function SignInPage() {
                   border:       '1px solid rgba(139,92,246,0.25)',
                   boxShadow:    '0 0 60px rgba(139,92,246,0.15), 0 24px 48px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05)',
                 },
-                headerTitle:      { color: '#F0F2FF', fontWeight: '800', fontSize: '20px' },
+                headerTitle:      { display: 'none' },
                 headerSubtitle:   { color: '#9CA3C8' },
                 socialButtonsBlockButton: {
                   background:   'rgba(139,92,246,0.08)',
@@ -203,7 +203,7 @@ export default function SignInPage() {
                 },
                 socialButtonsBlockButtonText: { color: '#D0D4F0', fontWeight: '600' },
                 dividerLine:      { background: 'rgba(139,92,246,0.2)' },
-                dividerText:      { color: '#4B5280' },
+                dividerText:      { color: '#8E96C8' },
                 formFieldLabel:   { color: '#9CA3C8', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em' },
                 formFieldInput:   { background: 'rgba(5,7,20,0.8)', border: '1px solid rgba(139,92,246,0.2)', color: '#F0F2FF' },
                 formButtonPrimary: {
@@ -213,8 +213,9 @@ export default function SignInPage() {
                   letterSpacing: '0.02em',
                   boxShadow:    '0 4px 20px rgba(139,92,246,0.4)',
                 },
-                footerActionLink: { color: '#A78BFA' },
-                footerActionText: { color: '#4B5280' },
+                footer:           { color: '#8E96C8' },
+                footerActionLink: { color: '#C4B5FD' },
+                footerActionText: { color: '#9CA3C8' },
               },
             }}
             afterSignInUrl="/dashboard"
@@ -231,7 +232,7 @@ export default function SignInPage() {
         {['ISO 27001', 'SOC 2 TYPE', 'PCI DSS', 'END-TO-END ENCRYPTED'].map(b => (
           <span key={b} style={{
             fontSize: 9, fontWeight: 700, letterSpacing: '0.12em',
-            color: 'rgba(167,139,250,0.4)', textTransform: 'uppercase',
+            color: 'rgba(196,181,253,0.8)', textTransform: 'uppercase',
           }}>{b}</span>
         ))}
       </div>

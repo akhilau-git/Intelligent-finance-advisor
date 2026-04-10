@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: finsight-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=finsight
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: finsight-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./services/api-gateway/.env
+    depends_on:
+      - postgres
+      - ocr-service
+      - fraud-service
+
+  ocr-service:
+    build: ./services/ocr-service
+    container_name: finsight-ocr
+    ports:
+      - "8002:8002"
+    env_file:
+      - ./services/ocr-service/.env
+
+  fraud-service:
+    build: ./services/fraud-service
+    container_name: finsight-fraud
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./services/fraud-service/.env
+
+  web:
+    build: ./apps/web
+    container_name: finsight-web
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./apps/web/.env.local
+    depends_on:
+      - api-gateway
+
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: finsight-cctv
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres_data:

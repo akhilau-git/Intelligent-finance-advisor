@@ -1,5 +1,7 @@
 # FinSight IFOS — How to Run
 
+<!-- markdownlint-disable MD022 MD031 MD032 MD033 MD034 MD040 MD056 MD060 -->
+
 **"The Autonomous Finance Advisor"**  
 Intelligent Billing & Reimbursement Management System  
 Problem Statement 11 | Balfour Beatty | U Akhila, ATME College of Engineering
@@ -35,27 +37,43 @@ Press `Ctrl + `` ` `` to open terminal.
 
 ---
 
-## Step 3 — Run 3 Terminals Simultaneously
+## Step 3 — Run Manually in Terminal (PowerShell)
 
-### Terminal 1 — Backend API (port 8000) [REQUIRED]
-```bash
+### 3.0 Stop Docker Ports First (important)
+
+If Docker stack is running, ports `3000`, `8000`, `8001`, `8002` are already occupied.
+
+Run from project root:
+
+```powershell
+docker compose stop web api-gateway fraud-service ocr-service
+```
+
+If you want Docker and manual mode together, use alternate ports shown below.
+
+---
+
+### 3.1 Terminal 1 — Backend API (port 8000)
+
+```powershell
 cd services\api-gateway
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8010
 ```
 ✅ Open: http://localhost:8000/docs
 
 ---
 
-### Terminal 2 — OCR Service (port 8002) [REQUIRED for bill scanning]
-```bash
+### 3.2 Terminal 2 — OCR Service (port 8002)
+
+```powershell
 cd services\ocr-service
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8002
+uvicorn main:app --reload --host 127.0.0.1 --port 8012
 ```
 ✅ Open: http://localhost:8002/docs
 
@@ -67,25 +85,86 @@ uvicorn main:app --reload --port 8002
 
 ---
 
-### Terminal 3 — Fraud Detection (port 8001) [REQUIRED for fraud scoring]
-```bash
+### 3.3 Terminal 3 — Fraud Detection (port 8001)
+
+```powershell
 cd services\fraud-service
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8001
+uvicorn main:app --reload --host 127.0.0.1 --port 8011
 ```
 ✅ Open: http://localhost:8001/docs
 
 ---
 
-### Terminal 4 — Frontend (port 3000) [REQUIRED]
-```bash
+### 3.4 Terminal 4 — Frontend (port 3000)
+
+```powershell
 cd apps\web
 npm install
 npm run dev
 ```
-✅ Open: http://localhost:3000
+✅ Open: http://localhost:3001
+
+---
+
+### 3.5 Alternate Ports (if WinError 10013 still appears)
+
+If any port is blocked, use these alternate ports instead. Run in separate terminals:
+
+#### 3.5.1 Terminal 1 — API Gateway (port 8010)
+
+```powershell
+cd services\api-gateway
+venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 127.0.0.1 --port 8010
+```
+✅ Open: http://localhost:8010/docs
+
+#### 3.5.2 Terminal 2 — OCR Service (port 8012)
+
+```powershell
+cd services\ocr-service
+venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 127.0.0.1 --port 8012
+```
+✅ Open: http://localhost:8012/docs
+
+#### 3.5.3 Terminal 3 — Fraud Service (port 8011)
+
+```powershell
+cd services\fraud-service
+venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 127.0.0.1 --port 8011
+```
+✅ Open: http://localhost:8011/docs
+
+#### 3.5.4 Terminal 4 — Frontend (port 3001)
+
+Create/update `apps\web\.env.local`:
+```
+NEXT_PUBLIC_API_URL=http://localhost:8010
+```
+
+Then run:
+```powershell
+cd apps\web
+npm install![alt text](image.png)
+npm run dev
+```
+✅ Open: http://localhost:3001
+
+---
+
+**Summary of Alternate URLs:**
+- API docs: http://localhost:8010/docs
+- Fraud docs: http://localhost:8011/docs
+- OCR docs: http://localhost:8012/docs
+- App: http://localhost:3001
 
 ---
 
@@ -120,7 +199,7 @@ When you go to **Submit Claim** and upload any bill:
 ```
 PDF/JPG/PNG/WEBP uploaded
         ↓
-OCR Service (port 8002)
+OCR Service (port 8002 or 8012 if using alternate ports)
         ↓
 Google Cloud Vision API reads text
         ↓
@@ -157,6 +236,12 @@ Auto-approved if clean + under ₹5,000
 | http://localhost:8001/docs | Fraud service API docs |
 | http://localhost:8002/docs | OCR service API docs |
 
+**If using alternate ports (Step 3.5), replace with:**
+- http://localhost:8010/docs — Backend API (port 8010)
+- http://localhost:8011/docs — Fraud service (port 8011)
+- http://localhost:8012/docs — OCR service (port 8012)
+- http://localhost:3001 — Frontend app (port 3001)
+
 ---
 
 ## Common Errors
@@ -168,9 +253,10 @@ Auto-approved if clean + under ₹5,000
 | CORS error | Check FRONTEND_URL in `services/api-gateway/.env` = `http://localhost:3000` |
 | 401 Unauthorized | Sign out and back in. Token expired. |
 | Table doesn't exist | Run SQL migrations in Supabase first |
-| Port in use | `netstat -ano | findstr :8000` then `taskkill /PID <number> /F` |
-| OCR returns empty | Check GOOGLE_CLOUD_VISION_KEY in `services/ocr-service/.env` |
-| PDF not working | Install poppler: `winget install poppler` or use JPG instead |
+| WinError 10013 / Port in use | Stop Docker service on same port: `docker compose stop web api-gateway fraud-service ocr-service` OR change to alternate ports in Step 3.5 |
+| OCR returns empty | Check `GOOGLE_CLOUD_VISION_KEY` in `services/ocr-service/.env`. Optional second provider: set `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`, `AZURE_DOCUMENT_INTELLIGENCE_KEY`, and optionally `AZURE_DOCUMENT_INTELLIGENCE_MODEL` (default `prebuilt-receipt`). |
+| PDF shows "Uploaded file is empty" | Re-export or re-download PDF, then upload again |
+| PDF is slow | Text PDFs are now fast-path parsed; scanned PDFs still use OCR and can take longer |
 
 ---
 

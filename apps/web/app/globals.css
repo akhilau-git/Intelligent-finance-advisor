@@ -306,3 +306,67 @@ body {
 /* ═══ PURPLE SCROLLBAR FOR SIDEBAR ═══ */
 .sidebar-nav::-webkit-scrollbar { width: 3px; }
 .sidebar-nav::-webkit-scrollbar-thumb { background: rgba(139,92,246,.3); border-radius: 2px; }
+
+/* ═══ DASHBOARD RESPONSIVE LAYOUT ═══ */
+@media (max-width: 1280px) {
+  .dashboard-top-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  .panel-ai {
+    grid-column: 1 / -1 !important;
+    grid-row: auto !important;
+  }
+
+  .stat-reimbursed,
+  .stat-rejected {
+    grid-column: 1 / -1 !important;
+  }
+
+  .stat-total,
+  .stat-pending,
+  .stat-fraud,
+  .stat-approved {
+    grid-column: auto !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .dashboard-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .dashboard-hero {
+    margin-right: 0 !important;
+  }
+
+  .dashboard-cta-link {
+    width: 100%;
+  }
+
+  .dashboard-cta {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .dashboard-top-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .stat-total,
+  .stat-pending,
+  .stat-fraud,
+  .stat-approved,
+  .stat-rejected,
+  .stat-reimbursed,
+  .panel-ai {
+    grid-column: 1 / -1 !important;
+    grid-row: auto !important;
+  }
+
+  .dashboard-bottom-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

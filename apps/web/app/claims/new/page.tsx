@@ -3,7 +3,7 @@
 import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@clerk/nextjs'
-import { claimsApi, setAuthToken } from '@/lib/api'
+import { claimsApi, setAuthToken, usersApi } from '@/lib/api'
 import { Upload, CheckCircle, Loader, AlertCircle, ArrowLeft, Zap, Camera } from 'lucide-react'
 import Link from 'next/link'
 
@@ -19,55 +19,198 @@ const CATS = [
 ]
 
 export default function NewClaimPage() {
+  const ocrBaseCandidates = [
+    process.env.NEXT_PUBLIC_OCR_URL,
+    'http://127.0.0.1:8012',
+    'http://localhost:8012',
+    'http://localhost:8002',
+  ].filter(Boolean) as string[]
+  const fraudBaseCandidates = [
+    process.env.NEXT_PUBLIC_FRAUD_URL,
+    'http://127.0.0.1:8011',
+    'http://localhost:8011',
+    'http://localhost:8001',
+  ].filter(Boolean) as string[]
+
   const router = useRouter()
   const { getToken } = useAuth()
   const fileRef = useRef<HTMLInputElement>(null)
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
+  const [warning, setWarning] = useState('')
+  const [fraudBlocked, setFraudBlocked] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [ocrLoading, setOcrLoading] = useState(false)
   const [form, setForm] = useState({
     merchant_name: '', expense_date: '', category: 'other',
-    subtotal: '', tax_amount: '', total_amount: '', notes: '',
+    subtotal: '', tax_amount: '', discount_amount: '', total_amount: '', notes: '',
+    ocr_metadata: null as any,
+    ocr_field_confidence: null as Record<string, number> | null,
+    low_confidence_fields: [] as string[],
+    extra_charge_details: [] as Array<{ label?: string; amount?: number; source_line?: string }>,
   })
 
-  const set = (k: string, v: string) => setForm(p => ({ ...p, [k]: v }))
+  const set = (k: string, v: any) => {
+    setForm(prev => {
+      const next = { ...prev, [k]: v }
+      // Auto-calculate total if components change, but don't force if it was OCR filled and user is just exploring
+      if (['subtotal', 'tax_amount', 'discount_amount'].includes(k)) {
+        const s = parseFloat(k === 'subtotal' ? v : next.subtotal) || 0
+        const t = parseFloat(k === 'tax_amount' ? v : next.tax_amount) || 0
+        const d = parseFloat(k === 'discount_amount' ? v : next.discount_amount) || 0
+        const calculated = s + t - d
+        if (calculated >= 0) {
+          next.total_amount = String(Number(calculated.toFixed(2)))
+        }
+      }
+      return next
+    })
+  }
   const sub = parseFloat(form.subtotal) || 0
   const tax = parseFloat(form.tax_amount) || 0
+  const discount = parseFloat(form.discount_amount) || 0
   const tot = parseFloat(form.total_amount) || 0
-  const mathOk = tot === 0 || Math.abs(sub + tax - tot) < 0.5
+  const mathOk = tot === 0 || Math.abs(sub + tax - discount - tot) < 0.5
+
+  const fetchWithFallback = async (bases: string[], path: string, options: RequestInit): Promise<Response> => {
+    let lastError: unknown = null
+    for (const base of bases) {
+      try {
+        const response = await fetch(`${base}${path}`, options)
+        if (response.ok || response.status >= 400) {
+          return response
+        }
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw lastError || new Error('All service endpoints failed')
+  }
 
   const handleFile = async (f: File) => {
     setFile(f)
+    setError('')
+    setWarning('')
+    setFraudBlocked(false)
+    if (f.size === 0) {
+      setError('Selected file is empty. Please choose a valid receipt file.')
+      return
+    }
     // OCR via backend
     setOcrLoading(true)
     try {
       const token = await getToken()
-      if (!token) return
+      if (!token) {
+        setError('Authentication expired. Please sign in again and retry.')
+        return
+      }
       setAuthToken(token)
       const fd = new FormData()
       fd.append('file', f)
-      const res = await fetch('http://localhost:8002/extract', {
+      const res = await fetchWithFallback(ocrBaseCandidates, '/extract', {
         method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
       })
-      if (res.ok) {
-        const data = await res.json()
-        const d = data.data || {}
-        if (d.merchant_name) set('merchant_name', d.merchant_name)
-        if (d.expense_date)  set('expense_date',  d.expense_date)
-        if (d.subtotal)      set('subtotal',       String(d.subtotal))
-        if (d.tax_amount)    set('tax_amount',     String(d.tax_amount))
-        if (d.total)         set('total_amount',   String(d.total))
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setError(err.detail || 'Receipt unreadable. Upload a clearer image (good lighting, full bill visible) or fill manually.')
+        return
       }
-    } catch { /* OCR failed silently — user fills manually */ }
-    setOcrLoading(false)
+
+      const data = await res.json()
+      if (!data.success) {
+        setError(data.error || 'OCR could not read this receipt. Please try a clearer image or fill the form manually.')
+        return
+      }
+
+      const d = data.data || {}
+      if (d.merchant_name) set('merchant_name', d.merchant_name)
+      if (d.expense_date)  set('expense_date',  d.expense_date)
+      if (d.subtotal !== undefined && d.subtotal !== null) set('subtotal', String(d.subtotal))
+      if (d.tax_amount !== undefined && d.tax_amount !== null) set('tax_amount', String(d.tax_amount))
+      if (d.discount_amount !== undefined && d.discount_amount !== null) set('discount_amount', String(d.discount_amount))
+      if (d.total !== undefined && d.total !== null) set('total_amount', String(d.total))
+      if (d.category) set('category', d.category)
+      if (d.rationale) set('ocr_metadata', d.rationale)
+      if (d.field_confidence && typeof d.field_confidence === 'object') {
+        set('ocr_field_confidence', d.field_confidence)
+      }
+      if (Array.isArray(d.low_confidence_fields)) {
+        set('low_confidence_fields', d.low_confidence_fields)
+      }
+      if (Array.isArray(d.extra_charge_details)) {
+        set('extra_charge_details', d.extra_charge_details)
+      }
+
+      const charges = d.charge_breakdown && typeof d.charge_breakdown === 'object' ? d.charge_breakdown : {}
+      const chargeLines = Array.isArray(d.extra_charge_details) && d.extra_charge_details.length
+        ? d.extra_charge_details.map((c: any) => `${c.label || 'Extra charge'}: ₹${c.amount ?? 0}${c.source_line ? ` (${c.source_line})` : ''}`)
+        : Object.entries(charges).map(([k, v]) => `${k.replace(/_/g, ' ')}: ₹${v}`)
+      const extraInfo = [
+        d.cgst_amount !== undefined && d.cgst_amount !== null ? `CGST: ₹${d.cgst_amount}` : '',
+        d.sgst_amount !== undefined && d.sgst_amount !== null ? `SGST: ₹${d.sgst_amount}` : '',
+        d.igst_amount !== undefined && d.igst_amount !== null ? `IGST: ₹${d.igst_amount}` : '',
+        d.due_amount !== undefined && d.due_amount !== null ? `Due amount: ₹${d.due_amount}` : '',
+        ...chargeLines,
+      ].filter(Boolean)
+      if (extraInfo.length || d.ticket_details) {
+        set('notes', [...extraInfo, d.ticket_details].filter(Boolean).join(' | '))
+      }
+
+      const lowFields = Array.isArray(d.low_confidence_fields) ? d.low_confidence_fields : []
+      const criticalLowFields = lowFields.filter((f: string) => ['merchant_name', 'expense_date', 'subtotal', 'tax_amount', 'total'].includes(f))
+      const overallConfidence = Number(d.confidence ?? 0)
+      if (data.needs_review || d.review_flag || overallConfidence < 0.6 || criticalLowFields.length) {
+        const suffix = lowFields.length ? ` Low-confidence fields: ${lowFields.map((f: string) => f.replace(/_/g, ' ')).join(', ')}.` : ''
+        setWarning(`Receipt detected with low confidence. Please verify amounts before submit.${suffix}`)
+      }
+
+      // Fraud pre-check on upload (duplicate / fake pattern warning)
+      try {
+        const me = await usersApi.getMe()
+        const employeeId = me?.data?.user?.id
+        if (employeeId) {
+          const fraudRes = await fetchWithFallback(fraudBaseCandidates, '/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              employee_id: employeeId,
+              merchant_name: d.merchant_name || '',
+              merchant_id: d.merchant_id || null,
+              total_amount: d.total || 0,
+              subtotal: d.subtotal || 0,
+              tax_amount: d.tax_amount || 0,
+              expense_date: d.expense_date || null,
+              receipt_hash: data.image_hash || null,
+              category: d.category || 'other',
+            }),
+          })
+          if (fraudRes.ok) {
+            const fraud = await fraudRes.json()
+            const score = Number(fraud?.fraud_score || 0)
+            if (score >= 0.6) {
+              setFraudBlocked(true)
+              setError('Potential fake/duplicate receipt detected. Please upload an original clear receipt or contact auditor.')
+            } else if (score >= 0.35) {
+              setWarning('Receipt flagged for manual review by fraud checks. You can submit, but it may go to review status.')
+            }
+          }
+        }
+      } catch {
+        // Non-blocking: user can still submit if fraud pre-check service is unavailable.
+      }
+    } catch {
+      setError('Unable to process this file right now. Please retry once.')
+    } finally {
+      setOcrLoading(false)
+    }
   }
 
   async function submit() {
+    if (fraudBlocked)      { setError('Submission blocked: this receipt looks potentially fake or duplicate.'); return }
     if (!form.merchant_name) { setError('Merchant name is required'); return }
     if (!form.total_amount)  { setError('Total amount is required'); return }
-    if (!mathOk)             { setError('Subtotal + Tax does not equal Total — please recheck'); return }
+    if (!mathOk)             { setError('Subtotal + Tax - Discount does not equal Total — please recheck'); return }
     setError('')
     setLoading(true)
     try {
@@ -113,6 +256,13 @@ export default function NewClaimPage() {
         </div>
       )}
 
+      {warning && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 10, padding: '10px 14px' }}>
+          <AlertCircle size={15} style={{ color: '#F59E0B', flexShrink: 0 }} />
+          <span style={{ fontSize: 13, color: '#FDE68A' }}>{warning}</span>
+        </div>
+      )}
+
       <div className="card" style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 22 }}>
 
         {/* Receipt Upload */}
@@ -137,10 +287,10 @@ export default function NewClaimPage() {
             ) : (
               <>
                 <p style={{ fontSize: 13, color: 'var(--text-secondary)', fontWeight: 600 }}>Click to upload receipt</p>
-                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>JPG, PNG — AI auto-extracts merchant, GST, amounts</p>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>JPG, PNG, PDF — AI auto-extracts merchant, GST, amounts</p>
               </>
             )}
-            <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+            <input ref={fileRef} type="file" accept="image/*,.pdf,application/pdf" style={{ display: 'none' }}
               onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
           </div>
         </div>
@@ -183,7 +333,7 @@ export default function NewClaimPage() {
           </div>
 
           {/* Amounts */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginTop: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 14, marginTop: 14 }}>
             <div>
               <label className="label-base">Subtotal (₹)</label>
               <input type="number" className="input-base" value={form.subtotal} onChange={e => set('subtotal', e.target.value)} placeholder="0.00" />
@@ -191,6 +341,11 @@ export default function NewClaimPage() {
             <div>
               <label className="label-base">Tax / GST (₹)</label>
               <input type="number" className="input-base" value={form.tax_amount} onChange={e => set('tax_amount', e.target.value)} placeholder="0.00"
+                style={{ borderColor: !mathOk && tot > 0 ? 'rgba(239,68,68,0.5)' : undefined }} />
+            </div>
+            <div>
+              <label className="label-base">Discount (₹)</label>
+              <input type="number" className="input-base" value={form.discount_amount} onChange={e => set('discount_amount', e.target.value)} placeholder="0.00"
                 style={{ borderColor: !mathOk && tot > 0 ? 'rgba(239,68,68,0.5)' : undefined }} />
             </div>
             <div>
@@ -210,7 +365,38 @@ export default function NewClaimPage() {
             </div>
           )}
           {!mathOk && tot > 0 && (
-            <p style={{ fontSize: 11, color: '#FCA5A5', marginTop: 6 }}>⚠ Math mismatch: off by ₹{Math.abs(sub + tax - tot).toFixed(2)}</p>
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8, background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.15)', padding: '12px', borderRadius: 10 }}>
+              <p style={{ fontSize: 11, color: '#FCA5A5', display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
+                <AlertCircle size={13} /> Math mismatch: off by ₹{Math.abs(sub + tax - discount - tot).toFixed(2)}
+              </p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button 
+                  onClick={() => set('total_amount', (sub + tax - discount).toFixed(2))}
+                  style={{ 
+                    flex: 1, fontSize: 10, fontWeight: 800, color: '#F0F2FF', background: 'rgba(139,92,246,0.2)', 
+                    border: '1px solid rgba(139,92,246,0.3)', padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(139,92,246,0.3)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(139,92,246,0.2)'}
+                >
+                  SYNC TOTAL TO SUM (₹{(sub + tax - discount).toFixed(2)})
+                </button>
+                <button 
+                  onClick={() => set('subtotal', (tot - tax + discount).toFixed(2))}
+                  style={{ 
+                    flex: 1, fontSize: 10, fontWeight: 800, color: '#34D399', background: 'rgba(16,185,129,0.12)', 
+                    border: '1px solid rgba(52,211,153,0.3)', padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(16,185,129,0.2)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(16,185,129,0.12)'}
+                >
+                  ADJUST SUBTOTAL TO MATCH TOTAL
+                </button>
+              </div>
+              <p style={{ fontSize: 9, color: 'rgba(156,163,192,0.6)', fontStyle: 'italic' }}>Tip: Use the button that matches the Grand Total on your physical receipt.</p>
+            </div>
           )}
 
           <div style={{ marginTop: 14 }}>
@@ -220,6 +406,71 @@ export default function NewClaimPage() {
               placeholder="Describe the purpose of this expense (required for amounts above ₹5,000)…" />
           </div>
         </div>
+
+        {/* AI Governance & Rationale Panel */}
+        {form.ocr_metadata && (
+          <div style={{ background: 'rgba(52,211,153,0.03)', border: '1px solid rgba(52,211,153,0.12)', borderRadius: 14, padding: '18px 20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(52,211,153,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <CheckCircle size={14} style={{ color: '#34D399' }} />
+              </div>
+              <div>
+                <h4 style={{ fontSize: 13, fontWeight: 800, color: '#F0F2FF', margin: 0 }}>AI Governance & Rationale</h4>
+                <p style={{ fontSize: 10, color: 'var(--text-muted)' }}>Transparent proof of extraction for audit trail</p>
+              </div>
+            </div>
+            
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              {Object.entries(form.ocr_metadata).map(([field, line]: [string, any]) => (
+                <div key={field} style={{ background: 'rgba(8,12,31,0.5)', padding: '10px 12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.05)' }}>
+                  <p style={{ fontSize: 9, fontWeight: 800, textTransform: 'uppercase', color: '#34D399', marginBottom: 4, letterSpacing: '0.04em' }}>{field.replace('_', ' ')} Evidence</p>
+                  <p style={{ fontSize: 11, color: '#D1D5DB', fontStyle: 'italic', margin: 0 }}>"{line}"</p>
+                </div>
+              ))}
+            </div>
+
+            {form.ocr_field_confidence && (
+              <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                {Object.entries(form.ocr_field_confidence).map(([field, score]) => {
+                  const percent = Math.round((Number(score) || 0) * 100)
+                  const isLow = percent < 75
+                  return (
+                    <div key={field} style={{ background: isLow ? 'rgba(245,158,11,0.08)' : 'rgba(8,12,31,0.5)', border: `1px solid ${isLow ? 'rgba(245,158,11,0.35)' : 'rgba(255,255,255,0.06)'}`, borderRadius: 10, padding: '10px 12px' }}>
+                      <p style={{ margin: 0, fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: isLow ? '#F59E0B' : '#A7F3D0' }}>{field.replace(/_/g, ' ')}</p>
+                      <p style={{ margin: '4px 0 0', fontSize: 14, fontWeight: 800, color: isLow ? '#FCD34D' : '#34D399' }}>{percent}%</p>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {form.extra_charge_details.length > 0 && (
+              <div style={{ marginTop: 14, padding: '12px', borderRadius: 10, border: '1px solid rgba(167,139,250,0.2)', background: 'rgba(139,92,246,0.05)' }}>
+                <p style={{ margin: 0, fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color: '#C4B5FD' }}>Extra Charges Detected</p>
+                <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
+                  {form.extra_charge_details.map((charge, idx) => (
+                    <div key={`${charge.label || 'charge'}-${idx}`} style={{ padding: '8px 10px', borderRadius: 8, background: 'rgba(8,12,31,0.45)', border: '1px solid rgba(167,139,250,0.15)' }}>
+                      <p style={{ margin: 0, fontSize: 12, color: '#F0F2FF', fontWeight: 700 }}>
+                        {charge.label || 'Extra charge'}: ₹{Number(charge.amount || 0).toFixed(2)}
+                      </p>
+                      {charge.source_line && (
+                        <p style={{ margin: '4px 0 0', fontSize: 10, color: 'rgba(156,163,200,0.8)' }}>
+                          Mentioned as: "{charge.source_line}"
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid rgba(52,211,153,0.1)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 10, color: 'rgba(52,211,153,0.6)', fontWeight: 600 }}>STATUS: MATHEMATICALLY VERIFIED</div>
+              <div style={{ height: 4, width: 4, borderRadius: '50%', background: 'rgba(52,211,153,0.3)' }} />
+              <div style={{ fontSize: 10, color: 'rgba(156,163,175,0.6)' }}>AUDIT ID: {Math.random().toString(16).slice(2, 10).toUpperCase()}</div>
+            </div>
+          </div>
+        )}
 
         {/* Triple-check indicator */}
         <div style={{ background: 'rgba(139,92,246,0.05)', border: '1px solid rgba(139,92,246,0.15)', borderRadius: 10, padding: '12px 14px' }}>

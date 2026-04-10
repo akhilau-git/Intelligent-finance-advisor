@@ -30,6 +30,7 @@ class ClaimCreate(BaseModel):
     currency: str = "INR"
     notes: Optional[str] = None
     status: str = "draft"
+    ocr_metadata: Optional[dict] = None
 
 
 class ClaimStatusUpdate(BaseModel):

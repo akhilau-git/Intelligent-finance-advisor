@@ -47,6 +47,7 @@ async def create_claim(claim: ClaimCreate, current_user: dict = Depends(get_curr
         "currency":      claim.currency,
         "notes":         claim.notes,
         "status":        claim.status or "draft",
+        "ocr_metadata":  claim.ocr_metadata,
     }
     result    = db.table("claims").insert(data).execute()
     new_claim = result.data[0]
