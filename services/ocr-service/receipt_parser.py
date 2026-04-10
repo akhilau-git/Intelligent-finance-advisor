@@ -493,11 +493,11 @@ def extract_amounts(text: str) -> dict:
 def extract_merchant(text: str) -> Optional[str]:
     """Find the merchant/vendor name, prioritizing business identifiers and cleaning noise."""
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    skip_merchant_line_keywords = ["total", "subtotal", "tax", "gst", "amount payable", "net payable", "grand total", "invoice total", "cash bill", "tax invoice", "invoice", "receipt", "bill", "memo"]
+    skip_merchant_line_keywords = ["total", "subtotal", "tax", "gst", "amount payable", "net payable", "grand total", "invoice total", "cash bill", "tax invoice", "invoice", "receipt", "bill", "memo", "date", "time", "qty", "amount"]
     
     # Priority 1: Lines containing business keywords
-    business_keywords = ["hotel", "restaurant", "store", "traders", "mart", "hospital", "clinic", "pharmacy", "medical", "bill", "pvt", "ltd"]
-    for line in lines[:8]:
+    business_keywords = ["hotel", "restaurant", "store", "traders", "trade", "mart", "hospital", "clinic", "pharmacy", "medical", "bill", "pvt", "ltd", "travel", "transport", "bus", "rail", "train"]
+    for line in lines[:12]:
         lowered = line.lower()
         if _is_contact_or_id_line(line):
             continue
@@ -512,8 +512,20 @@ def extract_merchant(text: str) -> Optional[str]:
             if len(cleaned) > 3:
                 return _normalize_merchant_name(cleaned[:100])
 
+    # Priority 1b: invoice headers often keep the merchant in the first line or two.
+    for line in lines[:3]:
+        if _is_contact_or_id_line(line):
+            continue
+        if any(k in line.lower() for k in skip_merchant_line_keywords):
+            continue
+        if len(line) > 3 and not re.match(r"^[\d\s\-/|#\.:]+$", line):
+            candidate = re.sub(r"\s+", " ", line).strip()
+            candidate = re.sub(r"\b(?:invoice|tax invoice|receipt|bill|cash memo)\b", "", candidate, flags=re.IGNORECASE).strip()
+            if len(candidate) > 3:
+                return _normalize_merchant_name(candidate[:100])
+
     # Priority 2: First meaningful line that isn't just symbols or numbers
-    for line in lines[:5]:
+    for line in lines[:8]:
         lowered = line.lower()
         if _is_contact_or_id_line(line):
             continue
@@ -554,17 +566,68 @@ def _normalize_merchant_name(name: str) -> str:
 
 def extract_date(text: str) -> Optional[str]:
     """Extract date, return in YYYY-MM-DD format."""
+    lines = _normalize_lines(text)
+    MONTHS = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+
+    def _build_date(y: int, mo: int, d: int) -> Optional[str]:
+        if 2000 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+        return None
+
+    def _parse_short_year(d: int, mo: int, y: int) -> Optional[str]:
+        if y < 100:
+            y += 2000 if y < 70 else 1900
+        return _build_date(y, mo, d)
+
+    # Prefer labeled dates in invoice headers and ticket summaries.
+    labeled_patterns = [
+        r"(?:invoice|bill|receipt|date|bill date|invoice date|txn date|transaction date|journey date|admission date|service date)[:\s\-]*([0-9]{1,2}[\-/\.][0-9]{1,2}[\-/\.][0-9]{2,4})",
+        r"(?:invoice|bill|receipt|date|bill date|invoice date|txn date|transaction date|journey date|admission date|service date)[:\s\-]*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{2,4})",
+        r"(?:invoice|bill|receipt|date|bill date|invoice date|txn date|transaction date|journey date|admission date|service date)[:\s\-]*([A-Za-z]{3,9}\s+[0-9]{1,2}[,\s]+[0-9]{2,4})",
+    ]
+    for pat in labeled_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            if re.match(r"^\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}$", candidate):
+                parts = re.split(r"[/\-.]", candidate)
+                d, mo, y = int(parts[0]), int(parts[1]), int(parts[2])
+                result = _parse_short_year(d, mo, y)
+                if result:
+                    return result
+            if re.match(r"^\d{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{2,4}$", candidate):
+                parts = candidate.replace(",", "").split()
+                d = int(parts[0])
+                mo = MONTHS.get(parts[1].lower()[:3], 1)
+                y = int(parts[2])
+                result = _parse_short_year(d, mo, y)
+                if result:
+                    return result
+            if re.match(r"^[A-Za-z]{3,9}\s+[0-9]{1,2}\s+[0-9]{2,4}$", candidate):
+                parts = candidate.replace(",", "").split()
+                mo = MONTHS.get(parts[0].lower()[:3], 1)
+                d = int(parts[1])
+                y = int(parts[2])
+                result = _parse_short_year(d, mo, y)
+                if result:
+                    return result
+
     patterns = [
         # DD/MM/YYYY or DD-MM-YYYY
         (r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})", "dmy"),
+        # DD/MM/YY or DD-MM-YY
+        (r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2})", "dmy2"),
         # YYYY-MM-DD or YYYY/MM/DD
         (r"(\d{4})[/\-\.](\d{1,2})[/\-\.](\d{1,2})", "ymd"),
         # DD Month YYYY  e.g. 15 Jan 2025
         (r"(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[,\s]+(\d{4})", "dmy_text"),
+        # DD Month YY
+        (r"(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[,\s]+(\d{2})", "dmy_text2"),
         # Month DD, YYYY  e.g. January 15, 2025
         (r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})[,\s]+(\d{4})", "mdy_text"),
+        # Month DD, YY
+        (r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})[,\s]+(\d{2})", "mdy_text2"),
     ]
-    MONTHS = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
 
     for pattern, fmt in patterns:
         m = re.search(pattern, text, re.IGNORECASE)
@@ -574,17 +637,37 @@ def extract_date(text: str) -> Optional[str]:
         try:
             if fmt == "dmy":
                 d, mo, y = int(g[0]), int(g[1]), int(g[2])
+            elif fmt == "dmy2":
+                d, mo, y = int(g[0]), int(g[1]), int(g[2])
             elif fmt == "ymd":
                 y, mo, d = int(g[0]), int(g[1]), int(g[2])
             elif fmt == "dmy_text":
                 d, mo, y = int(g[0]), MONTHS.get(g[1].lower()[:3], 1), int(g[2])
+            elif fmt == "dmy_text2":
+                d, mo, y = int(g[0]), MONTHS.get(g[1].lower()[:3], 1), int(g[2])
             else:  # mdy_text
                 mo, d, y = MONTHS.get(g[0].lower()[:3], 1), int(g[1]), int(g[2])
+            if y < 100:
+                y += 2000 if y < 70 else 1900
 
-            if 2000 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
-                return f"{y:04d}-{mo:02d}-{d:02d}"
+            result = _build_date(y, mo, d)
+            if result:
+                return result
         except (ValueError, IndexError):
             continue
+
+    # Fallback: scan line-by-line near date labels and short date tokens.
+    for line in lines[:14]:
+        lowered = line.lower()
+        if any(k in lowered for k in ["date", "bill date", "invoice date", "txn date", "transaction date", "journey date", "admission date", "service date"]):
+            for pattern, fmt in patterns:
+                m = re.search(pattern, line, re.IGNORECASE)
+                if m:
+                    candidate_text = m.group(0)
+                    nested = extract_date(candidate_text)
+                    if nested:
+                        return nested
+
     return None
 
 
@@ -599,12 +682,13 @@ def extract_gst(text: str) -> Optional[str]:
 def detect_document_type(text: str) -> str:
     lowered = text.lower()
     scores = {
-        "bus_ticket": sum(1 for k in ["bus ticket", "boarding point", "dropping point", "ticket pnr", "reporting time", "departure time"] if k in lowered),
+        "bus_ticket": sum(1 for k in ["bus ticket", "boarding point", "dropping point", "ticket pnr", "reporting time", "departure time", "pickup point", "bus no", "seat", "conductor", "bus fare"] if k in lowered),
         "train_ticket": sum(1 for k in ["irctc", "train", "coach", "berth", "seat no", "pnr", "boarding station"] if k in lowered),
         "flight_ticket": sum(1 for k in ["flight", "airline", "boarding pass", "departure", "arrival", "pnr", "terminal"] if k in lowered),
-        "utility_bill": sum(1 for k in ["electricity", "current charges", "energy charges", "units consumed", "consumer no", "meter", "eb bill"] if k in lowered),
-        "hotel_bill": sum(1 for k in ["hotel", "lodging", "room no", "rent per day", "check in", "check out"] if k in lowered),
-        "retail_invoice": sum(1 for k in ["invoice", "gstin", "hsn", "qty", "rate", "amount", "cash bill"] if k in lowered),
+        "utility_bill": sum(1 for k in ["electricity", "current charges", "energy charges", "units consumed", "consumer no", "meter", "eb bill", "bill summary", "bill period"] if k in lowered),
+        "hotel_bill": sum(1 for k in ["hotel", "lodging", "room no", "rent per day", "check in", "check out", "stay"] if k in lowered),
+        "retail_invoice": sum(1 for k in ["invoice", "gstin", "hsn", "qty", "rate", "amount", "cash bill", "tax invoice"] if k in lowered),
+        "medical_bill": sum(1 for k in ["hospital", "medical", "clinic", "patient", "admission", "discharge", "pathology", "diagnostic", "pharmacy"] if k in lowered),
     }
     best_type, best_score = max(scores.items(), key=lambda x: x[1])
     return best_type if best_score > 0 else "general_receipt"

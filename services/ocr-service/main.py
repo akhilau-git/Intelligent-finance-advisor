@@ -54,7 +54,7 @@ MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 MB
 _rapid_ocr_engine = RapidOCR() if RapidOCR else None
 OCR_CACHE_MAX = int(os.getenv("OCR_CACHE_MAX", "200"))
 _ocr_result_cache: dict[str, dict] = {}
-MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "25"))
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "0"))
 FRAUD_SERVICE_URL = os.getenv("FRAUD_SERVICE_URL", "http://fraud-service:8001").rstrip("/")
 COMPLIANCE_LOG_PATH = os.getenv("COMPLIANCE_LOG_PATH", "/tmp/ocr_audit_log.jsonl")
 
@@ -96,10 +96,12 @@ def _is_strong_candidate(parsed: dict, confidence: float) -> bool:
 
 def extract_text_pdf_native(pdf_bytes: bytes) -> tuple[str, float]:
     """Extract text from all PDF pages using pdfplumber/pypdf fallback."""
+    page_limit = None if MAX_PDF_PAGES <= 0 else MAX_PDF_PAGES
     try:
         text_parts = []
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages[:MAX_PDF_PAGES]:
+            pages = pdf.pages if page_limit is None else pdf.pages[:page_limit]
+            for page in pages:
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)
@@ -110,7 +112,8 @@ def extract_text_pdf_native(pdf_bytes: bytes) -> tuple[str, float]:
         # Fallback to pypdf if pdfplumber fails
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
-            text_parts = [p.extract_text() or "" for p in reader.pages[:MAX_PDF_PAGES]]
+            pages = reader.pages if page_limit is None else reader.pages[:page_limit]
+            text_parts = [p.extract_text() or "" for p in pages]
             text = "\n".join(p for p in text_parts if p).strip()
             if len(text) >= 40:
                 return text, 0.95
@@ -175,12 +178,13 @@ async def parse_with_ai(text: str, image_list: list[bytes], confidence: float) -
     return None
 
 
-async def pdf_to_images_fitz(pdf_bytes: bytes, max_pages: int = MAX_PDF_PAGES) -> list[bytes]:
-    """Convert every PDF page (up to configured limit) to images for OCR."""
+async def pdf_to_images_fitz(pdf_bytes: bytes, max_pages: int = 0) -> list[bytes]:
+    """Convert every PDF page to images for OCR unless an explicit page cap is configured."""
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         images = []
-        for i in range(min(len(doc), max_pages)):
+        page_limit = len(doc) if max_pages <= 0 else min(len(doc), max_pages)
+        for i in range(page_limit):
             page = doc.load_page(i)
             # Render page to a high-res image (300 DPI)
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
